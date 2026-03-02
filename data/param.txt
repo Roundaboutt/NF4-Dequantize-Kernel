@@ -1,6 +1,0 @@
-blocksize = 128
-groupsize = 128
-compute_type = "bf16"
-target_gpu = "T4"
-rows = 1023
-cols = 1023

@@ -13,7 +13,6 @@ def load_bf16_tensor(file_path, rows, cols):
     """
     读取二进制文件，并根据原始维度进行裁剪和重塑
     """
-    
     raw_data = np.fromfile(file_path, dtype=np.int16)
     total_original = rows * cols
     

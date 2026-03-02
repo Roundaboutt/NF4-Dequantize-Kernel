@@ -56,43 +56,32 @@ void read_file(
     file.read(reinterpret_cast<char*>(&offset), 4);
 }
 
-float half2float(uint16_t h) 
-{
-    uint8_t h_exp = (h >> 10) & 0x1F;
-    uint8_t h_sig = h & 0x3FF;
-    uint8_t h_sgn = (h >> 15) & 0x1;
-    uint32_t f_sgn = (uint32_t)h_sgn << 31;
-    uint32_t f_exp, f_sig;
-
-    if (h_exp == 0) 
-    {
-        if (h_sig == 0) return (h_sgn ? -0.0f : 0.0f);
-        f_exp = 0; h_sig <<= 1;
-        while ((h_sig & 0x400) == 0) { h_sig <<= 1; f_exp++; }
-        f_exp = 127 - 15 - f_exp;
-        f_sig = (h_sig & 0x3FF) << 13;
-    } 
-    else if (h_exp == 0x1F) 
-    {
-        f_exp = 0xFF; f_sig = (uint32_t)h_sig << 13;
-    } 
-    else 
-    {
-        f_exp = h_exp + (127 - 15);
-        f_sig = (uint32_t)h_sig << 13;
-    }
-    uint32_t f_bits = f_sgn | (f_exp << 23) | f_sig;
-    return *reinterpret_cast<float*>(&f_bits);
-}
-
-__constant__ float c_nf4_table[16] = {
--1.0, -0.6961928009986877, -0.5250730514526367, -0.39491748809814453, 
--0.28444138169288635, -0.18477343022823334, -0.09105003625154495, 0.0, 
-0.07958029955625534, 0.16093020141124725,0.24611230194568634, 0.33791524171829224, 
-0.44070982933044434, 0.5626170039176941, 0.7229568362236023, 1.0
-};
 
 __constant__ float c_code2[256];
+
+// NF4 table
+__device__ __forceinline__ float get_nf4_value(uint8_t idx) 
+{
+    switch(idx) {
+        case 0:  return -1.00000000f;
+        case 1:  return -0.69619280f;
+        case 2:  return -0.52507305f;
+        case 3:  return -0.39491749f;
+        case 4:  return -0.28444138f;
+        case 5:  return -0.18477343f;
+        case 6:  return -0.09105004f;
+        case 7:  return  0.00000000f;
+        case 8:  return  0.07958030f;
+        case 9:  return  0.16093020f;
+        case 10: return  0.24611230f;
+        case 11: return  0.33791524f;
+        case 12: return  0.44070983f;
+        case 13: return  0.56261700f;
+        case 14: return  0.72295684f;
+        case 15: return  1.00000000f;
+        default: return  0.0f;
+    }
+}
 
 __global__ void dequantize_nf4_kernel
 (
@@ -121,8 +110,8 @@ __global__ void dequantize_nf4_kernel
     uint8_t idx_0 = byte_val >> 4;          
     uint8_t idx_1 = byte_val & 0x0F;        
 
-    float v0_fp32 = c_nf4_table[idx_0] * final_scale;
-    float v1_fp32 = c_nf4_table[idx_1] * final_scale;
+    float v0_fp32 = get_nf4_value(idx_0) * final_scale;
+    float v1_fp32 = get_nf4_value(idx_1) * final_scale;
     
     __nv_bfloat16 v0_bf16 = __float2bfloat16(v0_fp32);
     __nv_bfloat16 v1_bf16 = __float2bfloat16(v1_fp32);
@@ -146,7 +135,11 @@ void nf4_dequantize_cuda
     size_t out_size = num_bytes * sizeof(uint32_t);
 
     float h_code2_f32[256];
-    for(int i = 0; i < 256; ++i) h_code2_f32[i] = half2float(h_code2[i]);
+    for(int i = 0; i < 256; ++i)
+    {
+        __half h_val = *reinterpret_cast<__half*>(&h_code2[i]);
+        h_code2_f32[i] = (float)h_val;        
+    } 
     CHECK_CUDA(cudaMemcpyToSymbol(c_code2, h_code2_f32, sizeof(h_code2_f32)));
 
     uint8_t *d_packed, *d_absmax_q;
@@ -165,14 +158,23 @@ void nf4_dequantize_cuda
     int threadsPerBlock = 1024;
     int blocksPerGrid = (num_bytes + threadsPerBlock - 1) / threadsPerBlock;
     
+    // warm up
+    for (int i = 0; i < 5; ++i)
+    {
+        dequantize_nf4_kernel<<<blocksPerGrid, threadsPerBlock>>>
+        (d_packed, d_absmax_q, d_absmax2, d_output, num_bytes, blocksize, goupsize, offset);        
+    }
+
     cudaEvent_t start, stop;
     cudaEventCreate(&start);
     cudaEventCreate(&stop);
-
-    
     cudaEventRecord(start); // 开始记录
-    dequantize_nf4_kernel<<<blocksPerGrid, threadsPerBlock>>>
-    (d_packed, d_absmax_q, d_absmax2, d_output, num_bytes, blocksize, goupsize, offset);
+    std::cout << "Launch Kernel...\n";
+    for (int i = 0; i < 10; ++i)
+    {
+        dequantize_nf4_kernel<<<blocksPerGrid, threadsPerBlock>>>
+        (d_packed, d_absmax_q, d_absmax2, d_output, num_bytes, blocksize, goupsize, offset);        
+    }
     cudaEventRecord(stop);  // 结束记录
     
     CHECK_CUDA(cudaEventSynchronize(stop)); // 等待 Event 完成
@@ -187,7 +189,7 @@ void nf4_dequantize_cuda
     size_t total_write = num_bytes * 4;
     
     double total_bytes = (double)(total_read + total_write);
-    double gb_per_sec = (total_bytes / 1e9) / (milliseconds / 1000.0);
+    double gb_per_sec = (total_bytes * 10 / 1e9) / (milliseconds / 1000.0);
 
     std::cout << "Kernel 耗时: " << milliseconds << " ms" << std::endl;
     std::cout << "有效带宽: " << gb_per_sec << " GB/s" << std::endl;
