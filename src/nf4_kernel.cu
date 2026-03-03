@@ -2,8 +2,6 @@
 #include <fstream>
 #include <vector>
 #include <cstdint>
-#include <iomanip>
-#include <cmath>
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
@@ -60,6 +58,7 @@ void read_file(
 __constant__ float c_code2[256];
 
 // NF4 table
+// 保持之前的寄存器优化函数不变
 __device__ __forceinline__ float get_nf4_value(uint8_t idx) 
 {
     switch(idx) {
@@ -88,40 +87,58 @@ __global__ void dequantize_nf4_kernel
     const uint8_t*  __restrict__ packed_weights, 
     const uint8_t*  __restrict__ absmax_q,       
     const half*     __restrict__ absmax2,
-    uint32_t*       __restrict__ output_packed,       
-    int num_bytes,
+    uint32_t*       __restrict__ output_packed, // 注意：这里虽然是指针，但我们会强转写 int4
+    int num_bytes, // 这里的 num_bytes 指的是 input 的字节数
     int block_size,
     int group_size,
     float offset
 ) 
 {
+    // 每个线程处理 4 个输入字节
+    // 所以总线程数只需要是 num_bytes / 4
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
-    if (tid >= num_bytes) return;
-
-    int element_idx = tid * 2;
-    int block_idx = element_idx / block_size;
-    int group_idx = block_idx / group_size; 
-
-    float scale_1 = c_code2[absmax_q[block_idx]] + offset; 
-    float scale_2 = __half2float(absmax2[group_idx]); 
-    float final_scale = scale_1 * scale_2;
-
-    uint8_t byte_val = packed_weights[tid]; 
-    uint8_t idx_0 = byte_val >> 4;          
-    uint8_t idx_1 = byte_val & 0x0F;        
-
-    float v0_fp32 = get_nf4_value(idx_0) * final_scale;
-    float v1_fp32 = get_nf4_value(idx_1) * final_scale;
     
-    __nv_bfloat16 v0_bf16 = __float2bfloat16(v0_fp32);
-    __nv_bfloat16 v1_bf16 = __float2bfloat16(v1_fp32);
+    if (tid * 4 >= num_bytes) return;
 
-    uint16_t bits_0 = *reinterpret_cast<unsigned short*>(&v0_bf16);
-    uint16_t bits_1 = *reinterpret_cast<unsigned short*>(&v1_bf16);
-    
-    output_packed[tid] = ((uint32_t)bits_1 << 16) | (uint32_t)bits_0;
+    // 向量化读取：一次吞下 4 个字节 (32-bit)
+    uint32_t packed_4bytes = reinterpret_cast<const uint32_t*>(packed_weights)[tid];
+
+    // 准备 128-bit 的输出容器 (4 个 uint32_t，每个 uint32_t 包含 2 个 bf16)
+    uint32_t out_vec[4];
+
+#pragma unroll
+    for (int i = 0; i < 4; ++i) {
+        uint8_t byte_val = (packed_4bytes >> (i * 8)) & 0xFF;
+
+        // 计算当前权重的全局索引
+        int element_idx = (tid * 4 + i) * 2;
+        int block_idx = element_idx / block_size;
+        int group_idx = block_idx / group_size;
+
+        float scale_1 = c_code2[absmax_q[block_idx]]; 
+        float scale_2 = __half2float(absmax2[group_idx]);
+        float final_scale = scale_1 * scale_2;
+
+        // 解码两个 NF4
+        uint8_t idx_0 = byte_val >> 4;
+        uint8_t idx_1 = byte_val & 0x0F;
+
+        float v0 = get_nf4_value(idx_0) * final_scale;
+        float v1 = get_nf4_value(idx_1) * final_scale;
+
+        __nv_bfloat16 b0 = __float2bfloat16(v0);
+        __nv_bfloat16 b1 = __float2bfloat16(v1);
+
+        uint16_t bits_0 = *reinterpret_cast<unsigned short*>(&b0);
+        uint16_t bits_1 = *reinterpret_cast<unsigned short*>(&b1);
+
+        // 打包结果存入临时数组
+        out_vec[i] = ((uint32_t)bits_1 << 16) | (uint32_t)bits_0;
+    }
+
+    // 向量化写入
+    reinterpret_cast<int4*>(output_packed)[tid] = *reinterpret_cast<int4*>(out_vec);
 }
-
 void nf4_dequantize_cuda
 (
     std::vector<uint8_t>& h_packed_weights, 
@@ -155,8 +172,9 @@ void nf4_dequantize_cuda
     CHECK_CUDA(cudaMemcpy(d_absmax_q, h_absmax_q.data(), h_absmax_q.size(), cudaMemcpyHostToDevice));
     CHECK_CUDA(cudaMemcpy(d_absmax2, h_absmax2.data(), h_absmax2.size() * 2, cudaMemcpyHostToDevice));
 
-    int threadsPerBlock = 1024;
-    int blocksPerGrid = (num_bytes + threadsPerBlock - 1) / threadsPerBlock;
+    int threadsPerBlock = 256;
+    int num_elements_vec = (num_bytes + 15) / 16;
+    int blocksPerGrid = (num_elements_vec + threadsPerBlock - 1) / threadsPerBlock;
     
     // warm up
     for (int i = 0; i < 5; ++i)

@@ -35,7 +35,6 @@ def generate_data(config_file="./data/param.txt"):
 
     # 一级量化 (NF4)
     q_weight, state_1 = F.quantize_4bit(aligned_weights, blocksize=blocksize, quant_type='nf4')
-    
     # 二级量化 (FP8)
     absmax_1 = state_1.absmax
     absmax_q, state_2 = F.quantize_blockwise(absmax_1, blocksize=groupsize, nested=False)
@@ -67,7 +66,7 @@ def generate_data(config_file="./data/param.txt"):
     print(f"--- 运行反量化 ---")
 
     start_event = torch.cuda.Event(enable_timing=True)
-    end_event = torch.cuda.Event(enable_timing=True)    
+    end_event = torch.cuda.Event(enable_timing=True)
     start_event.record()
     for _ in range(10):
         # 反量化缩放因子

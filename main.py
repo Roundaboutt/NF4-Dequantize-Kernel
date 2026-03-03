@@ -25,5 +25,6 @@ def main():
     # 运行对比分析脚本
     run_command("uv run ./src/benchmark.py", "对比精度与性能表现")
 
+    run_command("ncu --set full -o nf4 -f ./nf4_kernel", "生成ncu-rep文件")
 if __name__ == "__main__":
     main()
