@@ -8,6 +8,9 @@ wheels/
 
 # Virtual environments
 .venv/
-data/
+data/log
+data/cpp_output.bin
+data/py_output.bin
+data/qlora_test.bin
 .vscode/
 kernel_test/

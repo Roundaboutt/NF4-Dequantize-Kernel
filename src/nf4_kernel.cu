@@ -61,7 +61,8 @@ __constant__ float c_code2[256];
 // 保持之前的寄存器优化函数不变
 __device__ __forceinline__ float get_nf4_value(uint8_t idx) 
 {
-    switch(idx) {
+    switch(idx) 
+    {
         case 0:  return -1.00000000f;
         case 1:  return -0.69619280f;
         case 2:  return -0.52507305f;
@@ -87,23 +88,20 @@ __global__ void dequantize_nf4_kernel
     const uint8_t*  __restrict__ packed_weights, 
     const uint8_t*  __restrict__ absmax_q,       
     const half*     __restrict__ absmax2,
-    uint32_t*       __restrict__ output_packed, // 注意：这里虽然是指针，但我们会强转写 int4
-    int num_bytes, // 这里的 num_bytes 指的是 input 的字节数
+    uint32_t*       __restrict__ output_packed,
+    int num_bytes,
     int block_size,
     int group_size,
     float offset
 ) 
 {
+
     // 每个线程处理 4 个输入字节
     // 所以总线程数只需要是 num_bytes / 4
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     
     if (tid * 4 >= num_bytes) return;
-
-    // 向量化读取：一次吞下 4 个字节 (32-bit)
     uint32_t packed_4bytes = reinterpret_cast<const uint32_t*>(packed_weights)[tid];
-
-    // 准备 128-bit 的输出容器 (4 个 uint32_t，每个 uint32_t 包含 2 个 bf16)
     uint32_t out_vec[4];
 
 #pragma unroll
@@ -173,7 +171,7 @@ void nf4_dequantize_cuda
     CHECK_CUDA(cudaMemcpy(d_absmax2, h_absmax2.data(), h_absmax2.size() * 2, cudaMemcpyHostToDevice));
 
     int threadsPerBlock = 256;
-    int num_elements_vec = (num_bytes + 15) / 16;
+    int num_elements_vec = (num_bytes + 3) / 4;
     int blocksPerGrid = (num_elements_vec + threadsPerBlock - 1) / threadsPerBlock;
     
     // warm up
