@@ -13,7 +13,7 @@ def run_command(command, description):
 def main():
 
     # 编译 CUDA Kernel
-    compile_cmd = "nvcc -O3 ./src/nf4_kernel.cu -o nf4_kernel"
+    compile_cmd = "nvcc -O3 ./src/nf4_kernel.cu -o nf4_kernel -lineinfo"
     run_command(compile_cmd, "编译 C++ CUDA 内核")
 
     # 生成测试数据
